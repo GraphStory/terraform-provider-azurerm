@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -78,10 +77,14 @@ func resourceArmVirtualMachine() *schema.Resource {
 			},
 
 			"license_type": {
-				Type:         schema.TypeString,
-				Optional:     true,
-				Computed:     true,
-				ValidateFunc: validateLicenseType,
+				Type:             schema.TypeString,
+				Optional:         true,
+				Computed:         true,
+				DiffSuppressFunc: ignoreCaseDiffSuppressFunc,
+				ValidateFunc: validation.StringInSlice([]string{
+					"Windows_Client",
+					"Windows_Server",
+				}, true),
 			},
 
 			"vm_size": {
@@ -97,21 +100,27 @@ func resourceArmVirtualMachine() *schema.Resource {
 				MaxItems: 1,
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
+						"id": {
+							Type:     schema.TypeString,
+							Optional: true,
+							ForceNew: true,
+						},
+
 						"publisher": {
 							Type:     schema.TypeString,
-							Required: true,
+							Optional: true,
 							ForceNew: true,
 						},
 
 						"offer": {
 							Type:     schema.TypeString,
-							Required: true,
+							Optional: true,
 							ForceNew: true,
 						},
 
 						"sku": {
 							Type:     schema.TypeString,
-							Required: true,
+							Optional: true,
 							ForceNew: true,
 						},
 
@@ -239,6 +248,7 @@ func resourceArmVirtualMachine() *schema.Resource {
 						"create_option": {
 							Type:             schema.TypeString,
 							Required:         true,
+							ForceNew:         true,
 							DiffSuppressFunc: ignoreCaseDiffSuppressFunc,
 						},
 
@@ -343,6 +353,7 @@ func resourceArmVirtualMachine() *schema.Resource {
 
 						"custom_data": {
 							Type:      schema.TypeString,
+							ForceNew:  true,
 							Optional:  true,
 							Computed:  true,
 							StateFunc: userDataStateFunc,
@@ -361,10 +372,12 @@ func resourceArmVirtualMachine() *schema.Resource {
 						"provision_vm_agent": {
 							Type:     schema.TypeBool,
 							Optional: true,
+							Default:  false,
 						},
 						"enable_automatic_upgrades": {
 							Type:     schema.TypeBool,
 							Optional: true,
+							Default:  false,
 						},
 						"winrm": {
 							Type:     schema.TypeList,
@@ -491,15 +504,6 @@ func resourceArmVirtualMachine() *schema.Resource {
 	}
 }
 
-func validateLicenseType(v interface{}, k string) (ws []string, errors []error) {
-	value := v.(string)
-	if value != "" && value != "Windows_Server" {
-		errors = append(errors, fmt.Errorf(
-			"[ERROR] license_type must be 'Windows_Server' or empty"))
-	}
-	return
-}
-
 func resourceArmVirtualMachineCreate(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*ArmClient)
 	vmClient := client.vmClient
@@ -623,11 +627,11 @@ func resourceArmVirtualMachineRead(d *schema.ResourceData, meta interface{}) err
 	resp, err := vmClient.Get(resGroup, name, "")
 
 	if err != nil {
-		if resp.StatusCode == http.StatusNotFound {
+		if responseWasNotFound(resp.Response) {
 			d.SetId("")
 			return nil
 		}
-		return fmt.Errorf("Error making Read request on Azure Virtual Machine %s: %s", name, err)
+		return fmt.Errorf("Error making Read request on Azure Virtual Machine %s: %+v", name, err)
 	}
 
 	d.Set("name", resp.Name)
@@ -699,9 +703,11 @@ func resourceArmVirtualMachineRead(d *schema.ResourceData, meta interface{}) err
 
 		if resp.VirtualMachineProperties.NetworkProfile.NetworkInterfaces != nil {
 			for _, nic := range *resp.VirtualMachineProperties.NetworkProfile.NetworkInterfaces {
-				if nic.NetworkInterfaceReferenceProperties != nil && *nic.NetworkInterfaceReferenceProperties.Primary {
-					d.Set("primary_network_interface_id", nic.ID)
-					break
+				if props := nic.NetworkInterfaceReferenceProperties; props != nil {
+					if props.Primary != nil && *props.Primary {
+						d.Set("primary_network_interface_id", nic.ID)
+						break
+					}
 				}
 			}
 		}
@@ -740,11 +746,11 @@ func resourceArmVirtualMachineDelete(d *schema.ResourceData, meta interface{}) e
 
 		if osDisk.Vhd != nil {
 			if err = resourceArmVirtualMachineDeleteVhd(*osDisk.Vhd.URI, meta); err != nil {
-				return fmt.Errorf("Error deleting OS Disk VHD: %s", err)
+				return fmt.Errorf("Error deleting OS Disk VHD: %+v", err)
 			}
 		} else if osDisk.ManagedDisk != nil {
 			if err = resourceArmVirtualMachineDeleteManagedDisk(*osDisk.ManagedDisk.ID, meta); err != nil {
-				return fmt.Errorf("Error deleting OS Managed Disk: %s", err)
+				return fmt.Errorf("Error deleting OS Managed Disk: %+v", err)
 			}
 		} else {
 			return fmt.Errorf("Unable to locate OS managed disk properties from %s", name)
@@ -763,11 +769,11 @@ func resourceArmVirtualMachineDelete(d *schema.ResourceData, meta interface{}) e
 		for _, disk := range disks {
 			if disk.Vhd != nil {
 				if err = resourceArmVirtualMachineDeleteVhd(*disk.Vhd.URI, meta); err != nil {
-					return fmt.Errorf("Error deleting Data Disk VHD: %s", err)
+					return fmt.Errorf("Error deleting Data Disk VHD: %+v", err)
 				}
 			} else if disk.ManagedDisk != nil {
 				if err = resourceArmVirtualMachineDeleteManagedDisk(*disk.ManagedDisk.ID, meta); err != nil {
-					return fmt.Errorf("Error deleting Data Managed Disk: %s", err)
+					return fmt.Errorf("Error deleting Data Managed Disk: %+v", err)
 				}
 			} else {
 				return fmt.Errorf("Unable to locate data managed disk properties from %s", name)
@@ -792,12 +798,12 @@ func resourceArmVirtualMachineDeleteVhd(uri string, meta interface{}) error {
 
 	storageAccountResourceGroupName, err := findStorageAccountResourceGroup(meta, storageAccountName)
 	if err != nil {
-		return fmt.Errorf("Error finding resource group for storage account %s: %s", storageAccountName, err)
+		return fmt.Errorf("Error finding resource group for storage account %s: %+v", storageAccountName, err)
 	}
 
 	blobClient, saExists, err := meta.(*ArmClient).getBlobStorageClientForStorageAccount(storageAccountResourceGroupName, storageAccountName)
 	if err != nil {
-		return fmt.Errorf("Error creating blob store client for VHD deletion: %s", err)
+		return fmt.Errorf("Error creating blob store client for VHD deletion: %+v", err)
 	}
 
 	if !saExists {
@@ -811,7 +817,7 @@ func resourceArmVirtualMachineDeleteVhd(uri string, meta interface{}) error {
 	options := &storage.DeleteBlobOptions{}
 	err = blob.Delete(options)
 	if err != nil {
-		return fmt.Errorf("Error deleting VHD blob: %s", err)
+		return fmt.Errorf("Error deleting VHD blob: %+v", err)
 	}
 
 	return nil
@@ -830,7 +836,7 @@ func resourceArmVirtualMachineDeleteManagedDisk(managedDiskID string, meta inter
 	_, error := diskClient.Delete(resGroup, name, make(chan struct{}))
 	err = <-error
 	if err != nil {
-		return fmt.Errorf("Error deleting Managed Disk (%s %s) %s", name, resGroup, err)
+		return fmt.Errorf("Error deleting Managed Disk (%s %s) %+v", name, resGroup, err)
 	}
 
 	return nil
@@ -849,10 +855,18 @@ func resourceArmVirtualMachinePlanHash(v interface{}) int {
 func resourceArmVirtualMachineStorageImageReferenceHash(v interface{}) int {
 	var buf bytes.Buffer
 	m := v.(map[string]interface{})
-	buf.WriteString(fmt.Sprintf("%s-", m["publisher"].(string)))
-	buf.WriteString(fmt.Sprintf("%s-", m["offer"].(string)))
-	buf.WriteString(fmt.Sprintf("%s-", m["sku"].(string)))
-
+	if m["publisher"] != nil {
+		buf.WriteString(fmt.Sprintf("%s-", m["publisher"].(string)))
+	}
+	if m["offer"] != nil {
+		buf.WriteString(fmt.Sprintf("%s-", m["offer"].(string)))
+	}
+	if m["sku"] != nil {
+		buf.WriteString(fmt.Sprintf("%s-", m["sku"].(string)))
+	}
+	if m["id"] != nil {
+		buf.WriteString(fmt.Sprintf("%s-", m["id"].(string)))
+	}
 	return hashcode.String(buf.String())
 }
 
@@ -888,13 +902,17 @@ func resourceArmVirtualMachineStorageOsProfileLinuxConfigHash(v interface{}) int
 
 func resourceArmVirtualMachineStorageOsProfileWindowsConfigHash(v interface{}) int {
 	var buf bytes.Buffer
-	m := v.(map[string]interface{})
-	if m["provision_vm_agent"] != nil {
-		buf.WriteString(fmt.Sprintf("%t-", m["provision_vm_agent"].(bool)))
+
+	if v != nil {
+		m := v.(map[string]interface{})
+		if m["provision_vm_agent"] != nil {
+			buf.WriteString(fmt.Sprintf("%t-", m["provision_vm_agent"].(bool)))
+		}
+		if m["enable_automatic_upgrades"] != nil {
+			buf.WriteString(fmt.Sprintf("%t-", m["enable_automatic_upgrades"].(bool)))
+		}
 	}
-	if m["enable_automatic_upgrades"] != nil {
-		buf.WriteString(fmt.Sprintf("%t-", m["enable_automatic_upgrades"].(bool)))
-	}
+
 	return hashcode.String(buf.String())
 }
 
@@ -909,12 +927,20 @@ func flattenAzureRmVirtualMachinePlan(plan *compute.Plan) []interface{} {
 
 func flattenAzureRmVirtualMachineImageReference(image *compute.ImageReference) []interface{} {
 	result := make(map[string]interface{})
-	result["offer"] = *image.Offer
-	result["publisher"] = *image.Publisher
-	result["sku"] = *image.Sku
-
+	if image.Publisher != nil {
+		result["publisher"] = *image.Publisher
+	}
+	if image.Offer != nil {
+		result["offer"] = *image.Offer
+	}
+	if image.Sku != nil {
+		result["sku"] = *image.Sku
+	}
 	if image.Version != nil {
 		result["version"] = *image.Version
+	}
+	if image.ID != nil {
+		result["id"] = *image.ID
 	}
 
 	return []interface{}{result}
@@ -1343,14 +1369,12 @@ func expandAzureRmVirtualMachineDataDisk(d *schema.ResourceData) ([]compute.Data
 			data_disk.ManagedDisk = managedDisk
 		}
 
-		//BEGIN: code to be removed after GH-13016 is merged
 		if vhdURI != "" && managedDiskID != "" {
 			return nil, fmt.Errorf("[ERROR] Conflict between `vhd_uri` and `managed_disk_id` (only one or the other can be used)")
 		}
 		if vhdURI != "" && managedDiskType != "" {
 			return nil, fmt.Errorf("[ERROR] Conflict between `vhd_uri` and `managed_disk_type` (only one or the other can be used)")
 		}
-		//END: code to be removed after GH-13016 is merged
 		if managedDiskID == "" && strings.EqualFold(string(data_disk.CreateOption), string(compute.Attach)) {
 			return nil, fmt.Errorf("[ERROR] If create_option is 'Attach', must specify the managed disk id to attach to")
 		}
@@ -1394,18 +1418,31 @@ func expandAzureRmVirtualMachineImageReference(d *schema.ResourceData) (*compute
 	storageImageRefs := d.Get("storage_image_reference").(*schema.Set).List()
 
 	storageImageRef := storageImageRefs[0].(map[string]interface{})
-
+	imageID := storageImageRef["id"].(string)
 	publisher := storageImageRef["publisher"].(string)
-	offer := storageImageRef["offer"].(string)
-	sku := storageImageRef["sku"].(string)
-	version := storageImageRef["version"].(string)
 
-	return &compute.ImageReference{
-		Publisher: &publisher,
-		Offer:     &offer,
-		Sku:       &sku,
-		Version:   &version,
-	}, nil
+	imageReference := compute.ImageReference{}
+
+	if imageID != "" && publisher != "" {
+		return nil, fmt.Errorf("[ERROR] Conflict between `id` and `publisher` (only one or the other can be used)")
+	}
+
+	if imageID != "" {
+		imageReference.ID = riviera.String(storageImageRef["id"].(string))
+	} else {
+		offer := storageImageRef["offer"].(string)
+		sku := storageImageRef["sku"].(string)
+		version := storageImageRef["version"].(string)
+
+		imageReference = compute.ImageReference{
+			Publisher: &publisher,
+			Offer:     &offer,
+			Sku:       &sku,
+			Version:   &version,
+		}
+	}
+
+	return &imageReference, nil
 }
 
 func expandAzureRmVirtualMachineNetworkProfile(d *schema.ResourceData) compute.NetworkProfile {
@@ -1522,7 +1559,7 @@ func findStorageAccountResourceGroup(meta interface{}, storageAccountName string
 
 	rf, err := client.List(filter, expand, pager)
 	if err != nil {
-		return "", fmt.Errorf("Error making resource request for query %s: %s", filter, err)
+		return "", fmt.Errorf("Error making resource request for query %s: %+v", filter, err)
 	}
 
 	results := *rf.Value

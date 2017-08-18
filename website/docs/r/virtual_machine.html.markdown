@@ -69,7 +69,7 @@ resource "azurerm_virtual_machine" "test" {
   storage_image_reference {
     publisher = "Canonical"
     offer     = "UbuntuServer"
-    sku       = "14.04.2-LTS"
+    sku       = "16.04-LTS"
     version   = "latest"
   }
 
@@ -181,7 +181,7 @@ resource "azurerm_virtual_machine" "test" {
   storage_image_reference {
     publisher = "Canonical"
     offer     = "UbuntuServer"
-    sku       = "14.04.2-LTS"
+    sku       = "16.04-LTS"
     version   = "latest"
   }
 
@@ -250,8 +250,8 @@ For more information on the different example configurations, please check out t
 `Plan` supports the following:
 
 * `name` - (Required) Specifies the name of the image from the marketplace.
-* `publisher` - (Optional) Specifies the publisher of the image.
-* `product` - (Optional) Specifies the product of the image from the marketplace.
+* `publisher` - (Required) Specifies the publisher of the image.
+* `product` - (Required) Specifies the product of the image from the marketplace.
 
 `boot_diagnostics` supports the following:
 
@@ -260,9 +260,30 @@ For more information on the different example configurations, please check out t
 
 `storage_image_reference` supports the following:
 
-* `publisher` - (Required) Specifies the publisher of the image used to create the virtual machine. Changing this forces a new resource to be created.
-* `offer` - (Required) Specifies the offer of the image used to create the virtual machine. Changing this forces a new resource to be created.
-* `sku` - (Required) Specifies the SKU of the image used to create the virtual machine. Changing this forces a new resource to be created.
+* `id` - (Optional) Specifies the ID of the (custom) image to use to create the virtual 
+machine, for example:
+
+```hcl
+
+resource "azurerm_image" "test" {
+	name = "test"
+  ...
+}
+
+resource "azurerm_virtual_machine" "test" {
+	name = "test"
+  ...
+
+	storage_image_reference {
+		id = "${azurerm_image.test.id}"
+	}
+
+...
+```
+
+* `publisher` - (Required, when not using image resource) Specifies the publisher of the image used to create the virtual machine. Changing this forces a new resource to be created.
+* `offer` - (Required, when not using image resource) Specifies the offer of the image used to create the virtual machine. Changing this forces a new resource to be created.
+* `sku` - (Required, when not using image resource) Specifies the SKU of the image used to create the virtual machine. Changing this forces a new resource to be created.
 * `version` - (Optional) Specifies the version of the image used to create the virtual machine. Changing this forces a new resource to be created.
 
 `storage_os_disk` supports the following:
